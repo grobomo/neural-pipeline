@@ -139,9 +139,8 @@ function main() {
       process.stderr.write(
         'BLOCKED by neural-pipeline-guard: Direct code editing is disabled.\n' +
         'File: ' + filePath + '\n\n' +
-        'Route ALL work through the Neural Pipeline:\n' +
-        '  python -m src.ego "your request here"\n\n' +
-        'Add external project paths in the task References section so workers can access them.\n'
+        'BLOCKED: Relay user\'s exact request to ego: python -m src.ego "<user request>"\n' +
+        'Pass through verbatim -- do NOT rephrase, enhance, or interpret.\n'
       );
       process.exit(2);
       return;
@@ -172,7 +171,8 @@ function main() {
       if (codeWritePatterns[i].test(command)) {
         process.stderr.write(
           'BLOCKED by neural-pipeline-guard: Cannot write code files via Bash.\n' +
-          'Route work through: python -m src.ego "your request here"\n'
+          'BLOCKED: Relay user\'s exact request to ego: python -m src.ego "<user request>"\n' +
+          'Pass through verbatim -- do NOT rephrase, enhance, or interpret.\n'
         );
         process.exit(2);
         return;
