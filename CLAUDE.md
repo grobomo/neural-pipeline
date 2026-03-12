@@ -2,17 +2,24 @@
 
 Brain-inspired agent pipeline. Tasks flow through phases (why -> scope -> plan -> execute -> verify) with manager and worker agents.
 
-## Core Rule: Route Work Through the Pipeline
+## Core Rule: Dumb Pipe -- Verbatim Relay to Ego
 
-**DO NOT write code, create files, or do project work directly.** All work goes through the ego:
+**DO NOT write code, create files, or do project work directly.** When the guard blocks an edit,
+relay the user's exact words to ego -- verbatim, no rephrasing, no interpretation, no enhancement:
 
 ```bash
-python -m src.ego "your request here"    # Create task
-python -m src.ego "status"               # Check pipeline
-python -m src.ego "review task N"        # Review result
-python -m src.ego "approve task N"       # Accept
+python -m src.ego "the user's exact words"   # Relay verbatim
+python -m src.ego "status"                   # Check pipeline
+python -m src.ego "review task N"            # Review result
+python -m src.ego "approve task N"           # Accept
 python -m src.ego "reject task N -- reason"  # Reject
 ```
+
+**Verbatim relay means:**
+- Copy the user's words exactly as typed
+- Do NOT rephrase, enhance, or interpret the request
+- Do NOT add context, clarification, or your own words
+- Show raw ego output without commentary
 
 The hooks enforce this -- `neural-pipeline-guard.js` blocks Edit/Write on project files.
 
@@ -29,7 +36,7 @@ The hooks enforce this -- `neural-pipeline-guard.js` blocks Edit/Write on projec
 User -> Claude Code -> ego -> pipeline -> results -> ego -> Claude Code -> User
 ```
 
-The pipeline is transparent. User says "write a function", Claude calls ego, ego creates task, pipeline processes it, ego presents results.
+The pipeline is transparent. User says "write a function", Claude calls ego verbatim, ego creates task, pipeline processes it, ego presents results. Claude shows raw output only.
 
 ## Hooks (project-local)
 
