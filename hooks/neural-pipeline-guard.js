@@ -46,6 +46,12 @@ var ALWAYS_ALLOWED = [
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]pipeline[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]ego[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]monitor[/\\\\]'),
+  // Option C: Claude writes task files directly
+  /pipeline[/\\]input[/\\]/,
+  /pipeline[/\\]output[/\\]/,
+  /completed[/\\]/,
+  /failed[/\\]/,
+  /system[/\\]next-task-id$/,
   // Meta-files in any project
   /CLAUDE\.md$/,
   /SKILL\.md$/,
@@ -139,9 +145,8 @@ function main() {
       process.stderr.write(
         'BLOCKED by neural-pipeline-guard: Direct code editing is disabled.\n' +
         'File: ' + filePath + '\n\n' +
-        'Route ALL work through the Neural Pipeline:\n' +
-        '  python -m src.ego "your request here"\n\n' +
-        'Add external project paths in the task References section so workers can access them.\n'
+        'Create a task file in pipeline/input/ instead of editing code directly.\n' +
+        'See CLAUDE.md for the task file format.\n'
       );
       process.exit(2);
       return;
@@ -172,7 +177,7 @@ function main() {
       if (codeWritePatterns[i].test(command)) {
         process.stderr.write(
           'BLOCKED by neural-pipeline-guard: Cannot write code files via Bash.\n' +
-          'Route work through: python -m src.ego "your request here"\n'
+          'Create a task file in pipeline/input/ instead.\n'
         );
         process.exit(2);
         return;
