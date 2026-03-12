@@ -1,0 +1,28 @@
+# Reflection Cron Job
+# Triggered by monitor at end of session
+
+trigger: end_of_session
+timeout_minutes: 10
+
+steps:
+  - name: phase_manager_reflection
+    description: Each phase manager reviews its completed steps and journal
+    for_each_phase: true
+    actions:
+      - review worker logs for steps completed this session
+      - evaluate worker output against success criteria
+      - compare output to predictions (prediction error scoring)
+      - score rules loaded during this session
+      - score memories consulted during this session
+      - extract lessons (positive and negative)
+      - write new memory files to short-term/ if lessons are reusable
+      - update stats.yaml with session metrics
+      - move reviewed worker logs from logs/active/ to logs/archive/
+
+  - name: ego_review
+    description: Ego reviews all manager reports
+    actions:
+      - read all manager reports from this session
+      - adjust happiness based on aggregate signals
+      - tweak rules as needed
+      - review blocked/ tasks and notify user if applicable

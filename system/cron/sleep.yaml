@@ -1,0 +1,33 @@
+# Sleep Cron Job
+# Triggered by monitor after reflection completes
+
+trigger: after_reflection
+timeout_minutes: 5
+
+steps:
+  - name: memory_consolidation
+    description: Score and tier memories
+    actions:
+      - score all short-term memory files by importance
+      - below threshold -> move to long-term/
+      - long-term files older than threshold with no implementation -> move to lost/
+      - long-term files recently read + implemented -> promote to short-term/
+      - consolidate related memories (merge similar lessons)
+
+  - name: journal_rotation
+    description: Rotate journals that exceed size threshold
+    conditions:
+      journal_max_entries: 50
+      journal_max_kb: 100
+    actions:
+      - summarize old journal into key lessons (LLM call)
+      - move full journal to journal-archive/ with timestamp
+      - start fresh journal.md with header referencing archive
+      - write extracted lessons as memory files in short-term/
+
+  - name: archive_maintenance
+    description: Prune old data
+    actions:
+      - prune worker log archives older than retention period (14 days)
+      - move completed/recent/ tasks older than 30 days to completed/archive/
+      - move failed/recent/ tasks older than 30 days to failed/archive/
