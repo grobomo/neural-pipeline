@@ -1,5 +1,11 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node hooks/neural-pipeline-autostart.js"
+      }
+    ],
     "PreToolUse": [
       {
         "type": "command",

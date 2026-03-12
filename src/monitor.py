@@ -178,7 +178,14 @@ Time: {ts}
         self.log("health_check", health)
 
     def scan_for_existing_tasks(self):
-        """On startup, scan for tasks already in phase folders (crash recovery)."""
+        """On startup, scan input/ and phase folders for tasks (crash recovery)."""
+        # Scan input/ first -- tasks here need routing to why/
+        input_dir = self.config.root / "pipeline" / "input"
+        if input_dir.is_dir():
+            for task_file in input_dir.glob("task-*.md"):
+                self.log("existing_task_found", {"phase": "input", "task": task_file.name})
+                self.on_task_arrived(task_file)
+
         for phase in self.config.pipeline_phases:
             phase_dir = self.config.phase_dir(phase)
             for task_file in phase_dir.glob("task-*.md"):

@@ -12,7 +12,7 @@ echo "=== Neural Pipeline Hook Installer ==="
 echo ""
 
 # Verify hooks exist
-for hook in neural-pipeline-guard.js neural-pipeline-notifications.js neural-pipeline-heartbeat.js; do
+for hook in neural-pipeline-guard.js neural-pipeline-notifications.js neural-pipeline-heartbeat.js neural-pipeline-autostart.js; do
   if [ ! -f "$HOOKS_DIR/$hook" ]; then
     echo "ERROR: Missing hook: $HOOKS_DIR/$hook"
     exit 1
@@ -27,6 +27,12 @@ mkdir -p "$SETTINGS_DIR"
 cat > "$SETTINGS_FILE" << 'SETTINGS'
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node hooks/neural-pipeline-autostart.js"
+      }
+    ],
     "PreToolUse": [
       {
         "type": "command",
