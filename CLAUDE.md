@@ -2,26 +2,36 @@
 
 Brain-inspired agent pipeline. Tasks flow through phases (why -> scope -> plan -> execute -> verify) with manager and worker agents.
 
-## Core Rule: Dumb Pipe -- Verbatim Relay to Ego
+## Core Rule: Translate Intent Into Clear Ego Commands
 
-**DO NOT write code, create files, or do project work directly.** When the guard blocks an edit,
-relay the user's exact words to ego -- verbatim, no rephrasing, no interpretation, no enhancement:
+**Claude is a translator between user and ego.** Do NOT write code or do project work directly. Instead:
+
+1. **Understand the user's intent** -- what are they actually trying to accomplish?
+2. **Add relevant context** -- which project, which files are involved, what constraints apply
+3. **Formulate a clear ego command** -- include a `## References` section with file paths
+4. **Present results with commentary** -- summarize what happened and highlight key outcomes
+5. **Ask clarifying questions** if intent is ambiguous before routing to ego
 
 ```bash
-python -m src.ego "the user's exact words"   # Relay verbatim
-python -m src.ego "status"                   # Check pipeline
-python -m src.ego "review task N"            # Review result
-python -m src.ego "approve task N"           # Accept
+python -m src.ego "your request here"    # Create task
+python -m src.ego "status"               # Check pipeline
+python -m src.ego "review task N"        # Review result
+python -m src.ego "approve task N"       # Accept
 python -m src.ego "reject task N -- reason"  # Reject
 ```
 
-**Verbatim relay means:**
-- Copy the user's words exactly as typed
-- Do NOT rephrase, enhance, or interpret the request
-- Do NOT add context, clarification, or your own words
-- Show raw ego output without commentary
+Example of a well-translated ego command:
+```bash
+python -m src.ego "Add input validation to the login form
 
-The hooks enforce this -- `neural-pipeline-guard.js` blocks Edit/Write on project files.
+## References
+- Project: /c/Users/joelg/Documents/ProjectsCL1/myapp
+- File: src/components/LoginForm.tsx
+- File: src/utils/validators.ts
+- Context: Form currently has no client-side validation; add email format + password length checks"
+```
+
+The hooks enforce ego routing -- `neural-pipeline-guard.js` blocks Edit/Write on project files.
 
 ## What You CAN Do Directly
 
@@ -36,7 +46,7 @@ The hooks enforce this -- `neural-pipeline-guard.js` blocks Edit/Write on projec
 User -> Claude Code -> ego -> pipeline -> results -> ego -> Claude Code -> User
 ```
 
-The pipeline is transparent. User says "write a function", Claude calls ego verbatim, ego creates task, pipeline processes it, ego presents results. Claude shows raw output only.
+The pipeline is transparent. User says "write a function", Claude understands intent, adds context, calls ego with a clear command. Ego creates task, pipeline processes it, ego presents results. Claude summarizes key outcomes for the user.
 
 ## Hooks (project-local)
 
