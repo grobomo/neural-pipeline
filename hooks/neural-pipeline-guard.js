@@ -43,9 +43,14 @@ var ALWAYS_ALLOWED = [
   // Pipeline source code (its own implementation)
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]src[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]system[/\\\\]'),
+  new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]pipeline[/\\\\]input[/\\\\]'),
+  new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]pipeline[/\\\\]output[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]pipeline[/\\\\]'),
+  new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]completed[/\\\\]'),
+  new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]failed[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]ego[/\\\\]'),
   new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]monitor[/\\\\]'),
+  new RegExp(PIPELINE_ROOT.replace(/[\\]/g, '[/\\\\]') + '[/\\\\]system[/\\\\]next-task-id$'),
   // Meta-files in any project
   /CLAUDE\.md$/,
   /SKILL\.md$/,
@@ -137,11 +142,9 @@ function main() {
     // If it's a code file, block it
     if (isCodeFile(filePath)) {
       process.stderr.write(
-        'BLOCKED by neural-pipeline-guard: Direct code editing is disabled.\n' +
-        'File: ' + filePath + '\n\n' +
-        'Route ALL work through the Neural Pipeline:\n' +
-        '  python -m src.ego "your request here"\n\n' +
-        'Add external project paths in the task References section so workers can access them.\n'
+        'BLOCKED: Translate this request into a clear ego command with context.\n' +
+        'Include project path and relevant file references.\n' +
+        'python -m src.ego "clear description with ## References section"\n'
       );
       process.exit(2);
       return;
@@ -172,7 +175,8 @@ function main() {
       if (codeWritePatterns[i].test(command)) {
         process.stderr.write(
           'BLOCKED by neural-pipeline-guard: Cannot write code files via Bash.\n' +
-          'Route work through: python -m src.ego "your request here"\n'
+          'BLOCKED: Relay user\'s exact request to ego: python -m src.ego "<user request>"\n' +
+          'Pass through verbatim -- do NOT rephrase, enhance, or interpret.\n'
         );
         process.exit(2);
         return;
