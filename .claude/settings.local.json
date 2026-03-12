@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node hooks/neural-pipeline-guard.js",
+        "matcher": "Edit|Write|Bash"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node hooks/neural-pipeline-notifications.js"
+      },
+      {
+        "type": "command",
+        "command": "node hooks/neural-pipeline-heartbeat.js"
+      }
+    ]
+  }
+}

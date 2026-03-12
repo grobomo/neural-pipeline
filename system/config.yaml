@@ -1,0 +1,59 @@
+# Neural Pipeline -- System Configuration
+
+# Credential store key for Anthropic API
+credential_key: NEURAL_PIPELINE/API_KEY
+
+# Custom API endpoint (TrendMicro proxy)
+base_url: https://api.rdsec.trendmicro.com/prod/aiendpoint/
+
+# Auth token is the same credential as the API key
+auth_token_key: NEURAL_PIPELINE/API_KEY
+
+# Environment variables set before SDK calls
+env:
+  DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1"
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+
+# Model selection per agent role
+models:
+  ego: claude-sonnet-4-6
+  manager: claude-sonnet-4-6
+  worker: claude-haiku-4-5
+  monitor: claude-haiku-4-5
+  reflection: claude-sonnet-4-6
+
+# Pipeline phases (ordered)
+phases:
+  - input
+  - why
+  - scope
+  - plan
+  - execute
+  - verify
+  - output
+
+# Thresholds
+thresholds:
+  journal_max_entries: 50
+  journal_max_kb: 100
+  worker_log_retention_days: 14
+  completed_recent_days: 30
+  stuck_task_minutes: 30
+  monitor_heartbeat_seconds: 30
+  memory_long_term_threshold: 0.3
+  memory_lost_days: 365
+  rule_stale_task_count: 20
+
+# Happiness defaults
+happiness:
+  baseline: 50.0
+  start: 70.0
+  decay_rate: 0.1
+  improvement_threshold: 40.0
+
+# Max tokens per agent type
+max_tokens:
+  ego: 4096
+  manager: 4096
+  worker: 8192
+  reflection: 4096
