@@ -13,16 +13,16 @@ cct "add dark mode"          # One-shot
 
 ### How it works
 
-1. Every user message -> `ego.create_task()` -> task file in `pipeline/input/`
+1. Every user message -> `ego.create_task()` -> task file in project's `input/`
 2. API calls go through `ego.send_message()` -> logged to `ego/logs/` JSONL
 3. Tools execute against CWD (user's project, not pipeline root)
-4. Results written to `pipeline/output/task-NNNN.md`
+4. Results written to project's `output/task-NNNN.md`
 
 ### Session persistence
 
 No separate session files. Two existing sources of truth:
 
-- **Task files** (`pipeline/{phase}/task-NNNN.md`) -- what was requested, where it is, what happened
+- **Task files** (`pipeline/projects/{slug}/{phase}/task-NNNN.md`) -- what was requested, where it is, what happened
 - **Ego JSONL logs** (`ego/logs/*-ego.jsonl`) -- full API messages (user, assistant, tool calls, tool results)
 
 On startup the TUI:
@@ -49,13 +49,33 @@ On startup the TUI:
 ## Architecture
 
 ```
-User -> TUI (tui.py) -> Ego -> API -> tools against CWD -> pipeline/output/
+User -> TUI (tui.py) -> Ego -> API -> tools against CWD
                          |
                          v
                     ego/logs/ (JSONL -- full API message format)
-                    pipeline/input/ (task files)
-                    pipeline/output/ (completed task files)
+                    pipeline/projects/{slug}/input/   (task files per project)
+                    pipeline/projects/{slug}/output/  (completed tasks per project)
+                    pipeline/projects/{slug}/{phase}/  (why/scope/plan/execute/verify)
 ```
+
+### Per-project isolation
+
+Each target project gets its own pipeline folder under `pipeline/projects/`. The slug is `{dirname}-{hash6}` where hash6 is the first 6 chars of SHA-256 of the absolute path. This prevents collisions when two projects share the same directory name.
+
+```
+pipeline/projects/
+  my-app-a1b2c3/        # /home/user/code/my-app
+    input/
+    why/
+    scope/
+    ...
+    output/
+  my-app-f4e5d6/        # /other/path/my-app (different hash)
+    input/
+    ...
+```
+
+The monitor watches `pipeline/projects/` for new project directories and sets up phase watchers automatically. Config methods: `set_project(path)`, `set_project_slug(slug)`, `pipeline_dir()`, `phase_dir(phase)`, `all_project_dirs()`.
 
 ## Key Files
 
@@ -65,15 +85,16 @@ User -> TUI (tui.py) -> Ego -> API -> tools against CWD -> pipeline/output/
 | `src/ego.py` | Task creation, status, review, happiness, JSONL logging |
 | `src/agent_base.py` | SDK client, send_message(), message sanitization, max_tokens resolution |
 | `src/tools.py` | Tool definitions + path safety (allowed_roots) |
-| `src/config.py` | Reads system/config.yaml |
+| `src/config.py` | Reads system/config.yaml, per-project pipeline routing |
 | `src/credentials.py` | Retrieves API key from OS credential store |
-| `src/monitor.py` | Daemon, watches pipeline dirs, spawns managers |
+| `src/monitor.py` | Daemon, watches all project dirs, spawns managers |
 | `system/config.yaml` | Models, phases, thresholds |
 
 ## Design Principles
 
-- **Attention model**: The TUI checks for pipeline activity (monitor log) between loop iterations, not during. Like the brain: the autonomic nervous system fires constantly, but conscious attention only processes those signals in the gaps between active thought. No background threads -- just check between steps.
-- **Pain mode = hypervigilance**: When happiness drops below the improvement threshold (chronic pain), a background thread enables real-time monitor log tailing -- like how chronic pain forces conscious attention to signals normally filtered out. Normal mode: check between steps. Improvement mode: live stream.
+- **Attention model**: The TUI checks for pipeline activity (monitor log + task file changes) between loop iterations, not during. Like the brain: the autonomic nervous system fires constantly, but conscious attention only processes those signals in the gaps between active thought. No background threads -- just check between steps.
+- **Pain mode = hypervigilance**: When happiness drops below the improvement threshold (chronic pain), a background thread enables real-time monitoring -- like how chronic pain forces conscious attention to signals normally filtered out. Normal mode: check between steps. Improvement mode: live stream.
+- **Task file as single source of truth**: Each phase manager appends a `## Phase` section to the task file as it processes. The TUI watches tracked task files for growth and displays new sections inline -- no separate event logs or notification files needed.
 
 ## Windows Notes
 

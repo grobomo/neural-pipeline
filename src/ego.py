@@ -28,12 +28,14 @@ from .config import Config
 class Ego(AgentBase):
     """The prefrontal cortex of the Neural Pipeline."""
 
-    def __init__(self, config: Config | None = None, folder_name: str = ""):
+    def __init__(self, config: Config | None = None, project_name: str = "", project_path: "Path | None" = None):
         cfg = config or Config()
+        if project_path:
+            cfg.set_project(project_path)
         log_dir = cfg.ego_dir() / "logs"
-        
-        # Store folder_name for per-folder task ID counter
-        self.folder_name = folder_name
+
+        # Store project_name for per-project task ID counter
+        self.project_name = project_name
 
         # Load reference
         reference = ""
@@ -110,17 +112,33 @@ class Ego(AgentBase):
         threshold = self.state.get("improvement_threshold", 40.0)
         return self.state.get("happiness", 70.0) < threshold
 
+    # -- Pain Helpers --
+
+    @staticmethod
+    def _parse_pain_severity(content: str) -> int | None:
+        """Extract Pain-Severity from a task/pain file. Returns None if not a pain task."""
+        for line in content.splitlines():
+            if line.startswith("Severity:"):
+                try:
+                    return int(line.split(":")[1].strip())
+                except ValueError:
+                    pass
+        return None
+
+    def _is_pain_file(self, name: str) -> bool:
+        return name.startswith("pain-") and name.endswith(".md")
+
     # -- Task Creation --
 
     def _next_task_id(self) -> int:
         """Get and increment the task ID counter with file locking.
         
-        Uses per-folder task ID counter if folder_name is set, otherwise
+        Uses per-folder task ID counter if project_name is set, otherwise
         falls back to global counter for backward compatibility.
         """
-        # Construct counter path: per-folder if folder_name is set, else global
-        if self.folder_name:
-            counter_filename = f"next-task-id-{self.folder_name}"
+        # Construct counter path: per-folder if project_name is set, else global
+        if self.project_name:
+            counter_filename = f"next-task-id-{self.project_name}"
         else:
             counter_filename = "next-task-id"
         
@@ -159,7 +177,7 @@ class Ego(AgentBase):
         """Create a new task file in pipeline/input/."""
         task_id = self._next_task_id()
         task_name = f"task-{task_id:04d}.md"
-        input_dir = self.config.root / "pipeline" / "input"
+        input_dir = self.config.phase_dir("input")
         input_dir.mkdir(parents=True, exist_ok=True)
         task_path = input_dir / task_name
 
@@ -167,6 +185,7 @@ class Ego(AgentBase):
         content = f"""# Task {task_id:04d}: {request[:80]}
 Created: {ts}
 Source: {source}
+Project: {self.project_name or 'unknown'}
 
 ## User Request
 {request}
@@ -224,7 +243,7 @@ Source: {source}
     def review_task(self, task_id: int) -> dict[str, Any]:
         """Review a task that has reached the output phase."""
         task_name = f"task-{task_id:04d}.md"
-        output_dir = self.config.root / "pipeline" / "output"
+        output_dir = self.config.phase_dir("output")
         task_path = output_dir / task_name
 
         if not task_path.exists():
@@ -241,7 +260,7 @@ Source: {source}
     def approve_task(self, task_id: int) -> dict[str, Any]:
         """Approve a completed task."""
         task_name = f"task-{task_id:04d}.md"
-        output_dir = self.config.root / "pipeline" / "output"
+        output_dir = self.config.phase_dir("output")
         task_path = output_dir / task_name
 
         if not task_path.exists():
@@ -264,7 +283,7 @@ Source: {source}
     def reject_task(self, task_id: int, reason: str = "") -> dict[str, Any]:
         """Reject a completed task."""
         task_name = f"task-{task_id:04d}.md"
-        output_dir = self.config.root / "pipeline" / "output"
+        output_dir = self.config.phase_dir("output")
         task_path = output_dir / task_name
 
         if not task_path.exists():

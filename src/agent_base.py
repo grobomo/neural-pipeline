@@ -116,11 +116,18 @@ class AgentBase:
     _resolved_max_tokens: dict[str, int] = {}
 
     def _api_call_with_retry(self, kwargs: dict) -> anthropic.types.Message:
-        """Make API call with interruptible threading and max_tokens auto-correction."""
+        """Make API call with max_tokens auto-correction.
+
+        Uses timeout=1800s to bypass the SDK's preemptive 10-minute check
+        (triggered by our intentionally-high 128k max_tokens probe value).
+        Runs in a thread so Ctrl+C can interrupt on Windows.
+        """
         import re as _re
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(self.client.messages.create, **kwargs)
+            future = pool.submit(
+                self.client.messages.create, **kwargs, timeout=1800.0
+            )
             try:
                 return future.result()
             except KeyboardInterrupt:
@@ -137,7 +144,9 @@ class AgentBase:
                     kwargs["max_tokens"] = correct_max
                     self.log("max_tokens_resolved", {"model": self.model, "max_tokens": correct_max})
                     # Retry with corrected value
-                    future2 = pool.submit(self.client.messages.create, **kwargs)
+                    future2 = pool.submit(
+                        self.client.messages.create, **kwargs, timeout=1800.0
+                    )
                     try:
                         return future2.result()
                     except KeyboardInterrupt:

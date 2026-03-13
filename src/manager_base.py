@@ -136,6 +136,62 @@ class ManagerBase(AgentBase):
             parts.append(f"\n## Recent Journal\n{journal}")
         return "\n\n".join(parts)
 
+    # -- Pain Detection --
+
+    @property
+    def is_pain_task(self) -> bool:
+        """Check if the current task is a pain file (pain-NNNN.md)."""
+        return self.task_path.name.startswith("pain-")
+
+    def _build_pain_prompt(self) -> str:
+        """Build a diagnostic prompt for pain files instead of the standard
+        implementation-oriented prompt. Each phase asks a different question."""
+        prompts = {
+            "why": (
+                f"This is a PAIN SIGNAL -- an automated alert about a pipeline problem.\n\n"
+                f"{self.task_content}\n\n"
+                f"Diagnose WHY this problem occurred. Create steps to:\n"
+                f"1. Identify the root cause (not just the symptom)\n"
+                f"2. Check if this is a one-off or a systemic issue\n"
+            ),
+            "scope": (
+                f"This is a PAIN SIGNAL being diagnosed.\n\n"
+                f"{self.task_content}\n\n"
+                f"Determine the SCOPE of this problem. Create steps to:\n"
+                f"1. Assess blast radius -- what else is affected?\n"
+                f"2. Define what 'fixed' looks like (measurable criteria)\n"
+            ),
+            "plan": (
+                f"This is a PAIN SIGNAL that needs a remediation plan.\n\n"
+                f"{self.task_content}\n\n"
+                f"Plan the FIX. Create steps to:\n"
+                f"1. Identify the specific corrective action\n"
+                f"2. Determine if it can be automated or needs manual intervention\n"
+            ),
+            "execute": (
+                f"This is a PAIN SIGNAL -- execute the fix.\n\n"
+                f"{self.task_content}\n\n"
+                f"Execute the remediation. Create steps to:\n"
+                f"1. Apply the fix (re-spawn manager, retry step, adjust config, etc.)\n"
+                f"2. Verify the fix took effect\n"
+            ),
+            "verify": (
+                f"This is a PAIN SIGNAL -- verify the fix worked.\n\n"
+                f"{self.task_content}\n\n"
+                f"Verify the problem is resolved. Create steps to:\n"
+                f"1. Check that the original condition no longer exists\n"
+                f"2. Confirm no new problems were introduced\n"
+            ),
+        }
+
+        base = prompts.get(self.phase, prompts["execute"])
+        return (
+            base
+            + f"\nKeep it focused -- 1-2 steps max. This is diagnostics, not a project.\n\n"
+            f"Respond in this JSON format:\n"
+            f'{{"steps": [{{"description": "...", "instructions": "...", "success_criteria": ["...", "..."]}}]}}'
+        )
+
     # -- Core Manager Operations --
 
     def create_step(
@@ -212,6 +268,8 @@ Written: {datetime.now(timezone.utc).isoformat()}
             "--step", str(step_path),
             "--root", str(self.config.root),
         ]
+        if self.config._project_slug:
+            cmd.extend(["--project-slug", self.config._project_slug])
         self.log("worker_spawned", {"step": step_path.name, "cmd": " ".join(cmd)})
 
         kwargs = {
@@ -425,7 +483,7 @@ Respond in this exact JSON format:
             next_dir = self.config.phase_dir(next_phase)
         else:
             # Last processing phase -> output
-            next_dir = self.config.root / "pipeline" / "output"
+            next_dir = self.config.phase_dir("output")
 
         next_dir.mkdir(parents=True, exist_ok=True)
         dest = next_dir / self.task_path.name
@@ -449,21 +507,82 @@ Respond in this exact JSON format:
             self.flag_pain_signal("task-move-failed", f"Could not move {self.task_path.name}: {e}")
 
     def flag_pain_signal(self, signal_type: str, description: str):
-        """Write a pain signal to ego/pain-signals/."""
-        pain_dir = self.config.ego_dir() / "pain-signals"
-        pain_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        pain_path = pain_dir / f"{ts}-{self.phase}-{signal_type}.md"
-        content = f"""# Pain Signal: {signal_type}
+        """Create a pain file in the project's input/ dir.
+
+        Pain flows through the normal pipeline with diagnostic prompts.
+        Same happiness contract as Monitor.flag_pain_signal.
+        """
+        severity = self.config.pain_severity(signal_type)
+
+        # Pain enters the pipeline normally via input/
+        project_dir = self.task_path.parent.parent
+        input_dir = project_dir / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        # No dedup -- pain compounds. Repeated failures stack pain files,
+        # dropping happiness further until urgency forces resolution.
+
+        # Find next pain ID
+        max_id = 0
+        for phase_dir in project_dir.iterdir():
+            if not phase_dir.is_dir():
+                continue
+            for f in phase_dir.glob("pain-*.md"):
+                try:
+                    num = int(f.stem.split("-")[1])
+                    max_id = max(max_id, num)
+                except (IndexError, ValueError):
+                    continue
+        pain_id = max_id + 1
+
+        ts = datetime.now(timezone.utc).isoformat()
+        pain_name = f"pain-{pain_id:04d}.md"
+        pain_path = input_dir / pain_name
+        slug = project_dir.name
+
+        content = f"""# Pain {pain_id:04d}: {signal_type}
+Created: {ts}
 Source: {self.phase} manager
+Project: {slug}
 Task: {self.task_id}
-Time: {ts}
+Type: {signal_type}
+Severity: {severity}
 
 ## Description
 {description}
+
+## Resolution Required
+Fix the root cause and provide evidence. Severity: {severity}.
+Reward on verified fix: +{severity * 1.5:.1f} happiness.
 """
         pain_path.write_text(content, encoding="utf-8")
-        self.log("pain_signal", {"type": signal_type, "task": self.task_id})
+
+        # Drop happiness
+        try:
+            import yaml
+            state_path = self.config.ego_dir() / "state.yaml"
+            if state_path.exists():
+                with open(state_path) as f:
+                    state = yaml.safe_load(f) or {}
+            else:
+                state = {"happiness": 70.0}
+
+            old = state.get("happiness", 70.0)
+            state["happiness"] = max(0, old - severity)
+            state["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+            with open(state_path, "w") as f:
+                yaml.dump(state, f, default_flow_style=False)
+        except Exception:
+            pass
+
+        self.log("pain_signal", {
+            "type": signal_type,
+            "task": self.task_id,
+            "description": description,
+            "severity": severity,
+            "pain": pain_name,
+        })
 
     def run(self, **kwargs) -> dict[str, Any]:
         """Process a task through this phase.
@@ -491,8 +610,11 @@ Time: {ts}
         self.log("system", self.system_prompt)
         self.log("task_start", {"task_id": self.task_id, "phase": self.phase})
 
-        # Ask the LLM to break the task into steps
-        plan_prompt = f"""Here is the task to process in the {self.phase} phase:
+        # Pain files get diagnostic prompts; regular tasks get implementation prompts
+        if self.is_pain_task:
+            plan_prompt = self._build_pain_prompt()
+        else:
+            plan_prompt = f"""Here is the task to process in the {self.phase} phase:
 
 {self.task_content}
 

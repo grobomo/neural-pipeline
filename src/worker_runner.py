@@ -14,6 +14,8 @@ def main():
     parser.add_argument("--phase", required=True, help="Pipeline phase")
     parser.add_argument("--step", required=True, help="Path to step file")
     parser.add_argument("--root", required=True, help="Project root path")
+    parser.add_argument("--project-path", default="", help="Target project path (for per-project pipeline dirs)")
+    parser.add_argument("--project-slug", default="", help="Project slug (alternative to --project-path)")
     args = parser.parse_args()
 
     # Ensure project root is in sys.path
@@ -25,6 +27,10 @@ def main():
     from src.worker_base import WorkerBase
 
     config = Config()
+    if args.project_slug:
+        config.set_project_slug(args.project_slug)
+    elif args.project_path:
+        config.set_project(args.project_path)
     step_path = Path(args.step)
 
     if not step_path.exists():

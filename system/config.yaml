@@ -51,5 +51,25 @@ happiness:
   decay_rate: 0.1
   improvement_threshold: 40.0
 
+# Pain severity levels -- maps signal types to happiness impact.
+# On detection: happiness -= severity
+# On verified fix: happiness += severity * 1.5
+pain_severity:
+  # Critical: system is broken
+  manager-crashed: 10
+  task-routing-failed: 8
+
+  # Moderate: something is stuck or failing
+  stuck-task: 5
+  worker-failed: 5
+  no-steps: 4
+  manager-spawn-failed: 6
+
+  # Minor: recoverable issues
+  task-move-failed: 3
+
+  # Default for unknown signal types
+  default: 3
+
 # Max tokens: derived from model (opus=32768, sonnet/haiku=16384)
 # No config needed -- see config.py max_tokens_for()

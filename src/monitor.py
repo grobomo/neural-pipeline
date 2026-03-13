@@ -1,8 +1,8 @@
 """Monitor daemon for Neural Pipeline.
 
 The autonomic nervous system. Uses watchdog for filesystem event detection.
-Watches phase folders for task arrivals, spawns managers, runs health checks,
-and flags anomalies to the ego.
+Watches per-project phase folders for task arrivals, spawns managers, runs
+health checks, and flags anomalies to the ego.
 
 Usage:
   python -m src.monitor /path/to/project/root
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileMovedEvent
+from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileMovedEvent, DirCreatedEvent
 from watchdog.observers import Observer
 
 from .agent_base import AgentBase
@@ -30,19 +30,37 @@ class PipelineEventHandler(FileSystemEventHandler):
     def __init__(self, monitor: "Monitor"):
         self.monitor = monitor
 
+    def _is_pipeline_file(self, name: str) -> bool:
+        return name.endswith(".md") and (name.startswith("task-") or name.startswith("pain-"))
+
     def on_created(self, event):
         if event.is_directory:
             return
         path = Path(event.src_path)
-        if path.name.startswith("task-") and path.suffix == ".md":
+        if self._is_pipeline_file(path.name):
             self.monitor.on_task_arrived(path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
         dest = Path(event.dest_path)
-        if dest.name.startswith("task-") and dest.suffix == ".md":
+        if self._is_pipeline_file(dest.name):
             self.monitor.on_task_arrived(dest)
+
+
+class ProjectDiscoveryHandler(FileSystemEventHandler):
+    """Watches pipeline/projects/ for new project directories."""
+
+    def __init__(self, monitor: "Monitor"):
+        self.monitor = monitor
+
+    def on_created(self, event):
+        if not event.is_directory:
+            return
+        project_dir = Path(event.src_path)
+        # Only handle direct children of pipeline/projects/
+        if project_dir.parent == self.monitor._projects_root:
+            self.monitor.watch_project(project_dir)
 
 
 class Monitor(AgentBase):
@@ -62,18 +80,33 @@ class Monitor(AgentBase):
         self.health_dir = cfg.monitor_dir() / "health"
         self.health_dir.mkdir(parents=True, exist_ok=True)
         self._running = False
+        self._projects_root = cfg.root / "pipeline" / "projects"
+        self._watched_projects: set[str] = set()  # slugs we're already watching
+
+    def _extract_project_slug(self, task_path: Path) -> str | None:
+        """Extract project slug from a task path.
+
+        Expected: pipeline/projects/{slug}/{phase}/task-NNNN.md
+        So parent is phase dir, grandparent is project dir.
+        """
+        phase_dir = task_path.parent
+        project_dir = phase_dir.parent
+        if project_dir.parent == self._projects_root:
+            return project_dir.name
+        return None
 
     def on_task_arrived(self, task_path: Path):
         """Called when a task file appears in a phase folder."""
         try:
-            # Determine which phase this is
             phase = task_path.parent.name
+            slug = self._extract_project_slug(task_path)
             pipeline_phases = self.config.pipeline_phases
 
-            # Input phase: move task to first processing phase (why)
             if phase == "input":
-                self.log("task_detected", {"phase": "input", "task": task_path.name})
-                why_dir = self.config.phase_dir("why")
+                self.log("task_detected", {"phase": "input", "task": task_path.name, "project": slug or "?"})
+                # Route to why/ within the same project dir
+                project_dir = task_path.parent.parent
+                why_dir = project_dir / "why"
                 why_dir.mkdir(parents=True, exist_ok=True)
                 import shutil
                 dest = why_dir / task_path.name
@@ -81,25 +114,26 @@ class Monitor(AgentBase):
                     self.log("task_already_moved", {"task": task_path.name})
                     return
                 shutil.move(str(task_path), str(dest))
-                self.log("task_routed", {"from": "input", "to": "why", "task": task_path.name})
-                self.spawn_manager("why", dest)
+                self.log("task_routed", {"from": "input", "to": "why", "task": task_path.name, "project": slug or "?"})
+                self.spawn_manager("why", dest, slug)
                 return
 
             if phase not in pipeline_phases:
                 self.log("event_ignored", {"path": str(task_path), "reason": f"not a processing phase: {phase}"})
                 return
 
-            self.log("task_detected", {"phase": phase, "task": task_path.name})
-            self.spawn_manager(phase, task_path)
+            self.log("task_detected", {"phase": phase, "task": task_path.name, "project": slug or "?"})
+            self.spawn_manager(phase, task_path, slug)
         except Exception as e:
             self.log("error", {
                 "phase": "on_task_arrived",
                 "task": str(task_path),
                 "error": str(e),
             })
-            self.flag_pain_signal("task-routing-failed", f"Failed to route {task_path.name}: {e}")
+            slug = self._extract_project_slug(task_path)
+            self.flag_pain_signal("task-routing-failed", f"Failed to route {task_path.name}: {e}", slug)
 
-    def spawn_manager(self, phase: str, task_path: Path):
+    def spawn_manager(self, phase: str, task_path: Path, project_slug: str | None = None):
         """Spawn a manager subprocess for a phase."""
         cmd = [
             sys.executable, "-m", "src.manager_runner",
@@ -107,7 +141,10 @@ class Monitor(AgentBase):
             "--task", str(task_path),
             "--root", str(self.config.root),
         ]
-        self.log("manager_spawned", {"phase": phase, "task": task_path.name, "cmd": " ".join(cmd)})
+        if project_slug:
+            cmd.extend(["--project-slug", project_slug])
+
+        self.log("manager_spawned", {"phase": phase, "task": task_path.name, "project": project_slug or "?", "cmd": " ".join(cmd)})
 
         try:
             kwargs = {
@@ -121,23 +158,94 @@ class Monitor(AgentBase):
             self.log("manager_started", {"phase": phase, "pid": result.pid})
         except Exception as e:
             self.log("manager_spawn_error", {"phase": phase, "error": str(e)})
-            self.flag_pain_signal("manager-spawn-failed", f"Could not spawn {phase} manager: {e}")
+            self.flag_pain_signal("manager-spawn-failed", f"Could not spawn {phase} manager: {e}", project_slug)
 
-    def flag_pain_signal(self, signal_type: str, description: str):
-        """Write a pain signal to ego/pain-signals/."""
-        pain_dir = self.config.ego_dir() / "pain-signals"
-        pain_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-        pain_path = pain_dir / f"{ts}-monitor-{signal_type}.md"
-        content = f"""# Pain Signal: {signal_type}
+    def flag_pain_signal(self, signal_type: str, description: str, project_slug: str | None = None):
+        """Create a pain file in the project's input/ dir.
+
+        Pain flows through the normal pipeline (why -> scope -> plan ->
+        execute -> verify -> output). Managers detect pain-*.md files and
+        use diagnostic prompts instead of implementation prompts.
+
+        Drops happiness immediately by the signal's severity.
+        """
+        severity = self.config.pain_severity(signal_type)
+
+        # Pain enters the pipeline normally via input/
+        if project_slug:
+            input_dir = self._projects_root / project_slug / "input"
+            project_dir = self._projects_root / project_slug
+        else:
+            input_dir = self.config.root / "pipeline" / "input"
+            project_dir = self.config.root / "pipeline"
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pain compounds -- no dedup. Each cycle creates a new file.
+        ts = datetime.now(timezone.utc).isoformat()
+        pain_id = self._next_pain_id(project_dir)
+        pain_name = f"pain-{pain_id:04d}.md"
+        pain_path = input_dir / pain_name
+
+        content = f"""# Pain {pain_id:04d}: {signal_type}
+Created: {ts}
 Source: monitor
-Time: {ts}
+Project: {project_slug or 'unknown'}
+Type: {signal_type}
+Severity: {severity}
 
 ## Description
 {description}
+
+## Resolution Required
+Fix the root cause and provide evidence. Severity: {severity}.
+Reward on verified fix: +{severity * 1.5:.1f} happiness.
 """
         pain_path.write_text(content, encoding="utf-8")
-        self.log("pain_signal_sent", {"type": signal_type})
+
+        # Drop happiness immediately
+        self._apply_pain_to_happiness(severity)
+
+        self.log("pain_signal_sent", {
+            "type": signal_type,
+            "description": description,
+            "severity": severity,
+            "pain": pain_name,
+        })
+
+    def _next_pain_id(self, project_dir: Path) -> int:
+        """Get next pain ID by scanning existing pain files across all phases."""
+        max_id = 0
+        for phase_dir in project_dir.iterdir():
+            if not phase_dir.is_dir():
+                continue
+            for f in phase_dir.glob("pain-*.md"):
+                try:
+                    num = int(f.stem.split("-")[1])
+                    max_id = max(max_id, num)
+                except (IndexError, ValueError):
+                    continue
+        return max_id + 1
+
+    def _apply_pain_to_happiness(self, severity: int):
+        """Decrease ego happiness by pain severity."""
+        try:
+            state_path = self.config.ego_dir() / "state.yaml"
+            if state_path.exists():
+                with open(state_path) as f:
+                    state = yaml.safe_load(f) or {}
+            else:
+                state = {"happiness": 70.0}
+
+            old = state.get("happiness", 70.0)
+            state["happiness"] = max(0, old - severity)
+            state["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+            with open(state_path, "w") as f:
+                yaml.dump(state, f, default_flow_style=False)
+
+            self.log("happiness_pain", {"old": old, "new": state["happiness"], "severity": severity})
+        except Exception as e:
+            self.log("error", {"phase": "pain_happiness", "error": str(e)})
 
     def write_heartbeat(self):
         """Update the heartbeat file."""
@@ -147,46 +255,77 @@ Time: {ts}
         except Exception as e:
             self.log("error", {"phase": "heartbeat", "error": str(e)})
 
+    def watch_project(self, project_dir: Path):
+        """Set up watchers for all phase dirs in a project."""
+        slug = project_dir.name
+        if slug in self._watched_projects:
+            return
+
+        handler = PipelineEventHandler(self)
+        for phase in self.config.pipeline_phases:
+            phase_dir = project_dir / phase
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            self.observer.schedule(handler, str(phase_dir), recursive=False)
+
+        # Watch input/ too
+        input_dir = project_dir / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        self.observer.schedule(handler, str(input_dir), recursive=False)
+
+        self._watched_projects.add(slug)
+        self.log("watching_project", {"slug": slug, "path": str(project_dir)})
+
     def check_stuck_tasks(self):
-        """Check for tasks stuck too long in a phase."""
+        """Check for tasks stuck too long in a phase across all projects."""
         threshold_minutes = self.config.threshold("stuck_task_minutes")
         now = datetime.now(timezone.utc)
 
-        for phase in self.config.pipeline_phases:
-            phase_dir = self.config.phase_dir(phase)
-            for task_file in phase_dir.glob("task-*.md"):
-                # Check file modification time
-                import os
-                mtime = datetime.fromtimestamp(os.path.getmtime(task_file), tz=timezone.utc)
-                age_minutes = (now - mtime).total_seconds() / 60
+        for project_dir in self.config.all_project_dirs():
+            slug = project_dir.name
+            for phase in self.config.pipeline_phases:
+                phase_dir = project_dir / phase
+                if not phase_dir.is_dir():
+                    continue
+                for task_file in phase_dir.glob("task-*.md"):
+                    mtime = datetime.fromtimestamp(os.path.getmtime(task_file), tz=timezone.utc)
+                    age_minutes = (now - mtime).total_seconds() / 60
 
-                if age_minutes > threshold_minutes:
-                    self.log("stuck_task", {
-                        "phase": phase,
-                        "task": task_file.name,
-                        "age_minutes": round(age_minutes, 1),
-                    })
-                    self.flag_pain_signal(
-                        "stuck-task",
-                        f"Task {task_file.name} stuck in {phase} for {age_minutes:.0f} minutes",
-                    )
+                    if age_minutes > threshold_minutes:
+                        self.log("stuck_task", {
+                            "phase": phase,
+                            "task": task_file.name,
+                            "project": slug,
+                            "age_minutes": round(age_minutes, 1),
+                        })
+                        self.flag_pain_signal(
+                            "stuck-task",
+                            f"Task {task_file.name} stuck in {phase} for {age_minutes:.0f} minutes",
+                            slug,
+                        )
 
     def check_health(self):
         """Run all health checks and write results."""
         health = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "phases": {},
+            "projects": {},
         }
-        for phase in self.config.pipeline_phases:
-            phase_dir = self.config.phase_dir(phase)
-            tasks = list(phase_dir.glob("task-*.md"))
-            pending = list((phase_dir / "workers" / "steps" / "pending").glob("*.md")) if (phase_dir / "workers" / "steps" / "pending").is_dir() else []
-            active = list((phase_dir / "workers" / "steps" / "active").glob("*.md")) if (phase_dir / "workers" / "steps" / "active").is_dir() else []
-            health["phases"][phase] = {
-                "tasks": len(tasks),
-                "pending_steps": len(pending),
-                "active_steps": len(active),
-            }
+        for project_dir in self.config.all_project_dirs():
+            slug = project_dir.name
+            project_health = {}
+            for phase in self.config.pipeline_phases:
+                phase_dir = project_dir / phase
+                if not phase_dir.is_dir():
+                    project_health[phase] = {"tasks": 0}
+                    continue
+                tasks = list(phase_dir.glob("task-*.md"))
+                pending = list((phase_dir / "workers" / "steps" / "pending").glob("*.md")) if (phase_dir / "workers" / "steps" / "pending").is_dir() else []
+                active = list((phase_dir / "workers" / "steps" / "active").glob("*.md")) if (phase_dir / "workers" / "steps" / "active").is_dir() else []
+                project_health[phase] = {
+                    "tasks": len(tasks),
+                    "pending_steps": len(pending),
+                    "active_steps": len(active),
+                }
+            health["projects"][slug] = project_health
 
         health_path = self.health_dir / "latest.yaml"
         with open(health_path, "w") as f:
@@ -195,42 +334,46 @@ Time: {ts}
         self.log("health_check", health)
 
     def scan_for_existing_tasks(self):
-        """On startup, scan input/ and phase folders for tasks (crash recovery)."""
-        # Scan input/ first -- tasks here need routing to why/
-        input_dir = self.config.root / "pipeline" / "input"
-        if input_dir.is_dir():
-            for task_file in input_dir.glob("task-*.md"):
-                self.log("existing_task_found", {"phase": "input", "task": task_file.name})
-                self.on_task_arrived(task_file)
+        """On startup, scan all project dirs for tasks (crash recovery)."""
+        for project_dir in self.config.all_project_dirs():
+            slug = project_dir.name
 
-        for phase in self.config.pipeline_phases:
-            phase_dir = self.config.phase_dir(phase)
-            for task_file in phase_dir.glob("task-*.md"):
-                self.log("existing_task_found", {"phase": phase, "task": task_file.name})
-                self.spawn_manager(phase, task_file)
+            # Scan input/ first
+            input_dir = project_dir / "input"
+            if input_dir.is_dir():
+                for task_file in input_dir.glob("task-*.md"):
+                    self.log("existing_task_found", {"phase": "input", "task": task_file.name, "project": slug})
+                    self.on_task_arrived(task_file)
+
+            for phase in self.config.pipeline_phases:
+                phase_dir = project_dir / phase
+                if not phase_dir.is_dir():
+                    continue
+                for task_file in phase_dir.glob("task-*.md"):
+                    self.log("existing_task_found", {"phase": phase, "task": task_file.name, "project": slug})
+                    self.spawn_manager(phase, task_file, slug)
 
     def run(self, **kwargs):
         """Start the monitor daemon."""
         self.log("monitor_start", {"root": str(self.config.root)})
         self._running = True
-        
+
         # Write PID file
         pid_file = Path(".tmp") / "monitor.pid"
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         pid_file.write_text(str(os.getpid()))
 
-        # Set up watchdog observers for each phase folder
-        handler = PipelineEventHandler(self)
-        for phase in self.config.pipeline_phases:
-            phase_dir = self.config.phase_dir(phase)
-            phase_dir.mkdir(parents=True, exist_ok=True)
-            self.observer.schedule(handler, str(phase_dir), recursive=False)
-            self.log("watching", {"phase": phase, "path": str(phase_dir)})
+        # Ensure projects root exists
+        self._projects_root.mkdir(parents=True, exist_ok=True)
 
-        # Also watch input/ for tasks that need to be moved to why/
-        input_dir = self.config.root / "pipeline" / "input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        self.observer.schedule(handler, str(input_dir), recursive=False)
+        # Watch for new project directories
+        discovery_handler = ProjectDiscoveryHandler(self)
+        self.observer.schedule(discovery_handler, str(self._projects_root), recursive=False)
+        self.log("watching_projects_root", {"path": str(self._projects_root)})
+
+        # Set up watchers for all existing project dirs
+        for project_dir in self.config.all_project_dirs():
+            self.watch_project(project_dir)
 
         self.observer.start()
         self.log("observer_started", {})
@@ -278,7 +421,6 @@ def main():
         root = Path(sys.argv[1]).resolve()
 
     if root:
-        # Override config to use specified root
         import os
         os.chdir(str(root))
 
