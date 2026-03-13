@@ -1,1 +1,1 @@
-# Neural Pipeline - Brain-inspired agent system
+"""Main source package."""

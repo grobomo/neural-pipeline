@@ -1,6 +1,6 @@
 """Ego agent for Neural Pipeline.
 
-The sole interface to the system. Called by Claude Code via CLI.
+The sole interface to the system. Called by TUI (cct) via shell alias.
 Creates tasks, reviews results, manages happiness, delegates investigations.
 
 Usage:
@@ -11,6 +11,7 @@ Usage:
   python -m src.ego "reject task 0003 -- tests don't pass"
 """
 import json
+import os
 import re
 import shutil
 import sys
@@ -27,9 +28,12 @@ from .config import Config
 class Ego(AgentBase):
     """The prefrontal cortex of the Neural Pipeline."""
 
-    def __init__(self, config: Config | None = None):
+    def __init__(self, config: Config | None = None, folder_name: str = ""):
         cfg = config or Config()
         log_dir = cfg.ego_dir() / "logs"
+        
+        # Store folder_name for per-folder task ID counter
+        self.folder_name = folder_name
 
         # Load reference
         reference = ""
@@ -109,14 +113,47 @@ class Ego(AgentBase):
     # -- Task Creation --
 
     def _next_task_id(self) -> int:
-        """Atomically get and increment the task ID counter."""
-        counter_path = self.config.system_dir() / "next-task-id"
-        current = 0
-        if counter_path.exists():
-            current = int(counter_path.read_text().strip())
-        next_id = current + 1
-        counter_path.write_text(str(next_id))
-        return next_id
+        """Get and increment the task ID counter with file locking.
+        
+        Uses per-folder task ID counter if folder_name is set, otherwise
+        falls back to global counter for backward compatibility.
+        """
+        # Construct counter path: per-folder if folder_name is set, else global
+        if self.folder_name:
+            counter_filename = f"next-task-id-{self.folder_name}"
+        else:
+            counter_filename = "next-task-id"
+        
+        counter_path = self.config.system_dir() / counter_filename
+        counter_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Use a lock file to prevent race conditions
+        lock_path = counter_path.with_suffix(".lock")
+        try:
+            # Simple lock: create exclusively, retry briefly
+            import time
+            for _ in range(10):
+                try:
+                    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.close(fd)
+                    break
+                except FileExistsError:
+                    time.sleep(0.1)
+            else:
+                # Stale lock -- remove and proceed
+                lock_path.unlink(missing_ok=True)
+
+            current = 0
+            if counter_path.exists():
+                try:
+                    current = int(counter_path.read_text().strip())
+                except (ValueError, OSError) as e:
+                    self.log("error", {"phase": "task_id", "error": f"Bad counter file: {e}"})
+            next_id = current + 1
+            counter_path.write_text(str(next_id))
+            return next_id
+        finally:
+            lock_path.unlink(missing_ok=True)
 
     def create_task(self, request: str, source: str = "user") -> Path:
         """Create a new task file in pipeline/input/."""
@@ -357,6 +394,10 @@ def main():
     try:
         result = ego.run(request=request)
         print(json.dumps(result, indent=2, default=str))
+    except Exception as e:
+        ego.log("error", {"phase": "ego_cli", "error": str(e)})
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     finally:
         ego.close_log()
 

@@ -39,6 +39,8 @@ Neural_Pipeline_Build_Report.pdf
 
 # Temp
 .tmp/
+temp_*.txt
+*.bak
 
 # OS
 .DS_Store
@@ -47,11 +49,60 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.mcp.json
+
+# Pipeline task files (generated at runtime)
+pipeline/*/task-*.md
+pipeline/*/workers/
+pipeline/approve_*.md
+pipeline/plan/*.py
+pipeline/plan/*_notes.md
+pipeline/plan/*_results.md
+pipeline/plan/*_diagnosis.md
+pipeline/plan/*_plan.md
+pipeline/plan/*_scope.md
+pipeline/plan/*_output.md
+pipeline/scope/*
+
+# Per-folder task counters (runtime)
+system/next-task-id-*
+
+# Task/scope/phase artifacts dumped in root by workers
+SCOPE_*.md
+TASK_*.md
+TASK_*.txt
+WHY_*.md
+WHY_PHASE_*.md
+approve_*.md
+task_*.md
+task_*.txt
+scraper_*.md
+why-analysis.md
+todo.md
+
+# Test artifacts
+test_*.py
+tests/
+pipeline_test_output.txt
+pipeline_verification.txt
+
+# Scratch scripts
+ego_find.py
+check_pep8.py
+
+# Sub-projects created by workers (not part of core)
+news_scraper/
+src/news_scraper/
+src/scraper/
+tasks/
+docs/
+
+# Other generated
 STEP_*
 VERIFICATION_*
 VERIFY_*
 SCOPE.md
-check_pep8.py
 *.log
-.mcp.json
-pipeline/*/task-*.md
+
+# Claude Code local settings
+.claude/settings.local.json

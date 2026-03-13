@@ -59,7 +59,9 @@ class Config:
         return self._data["models"].get(role, "claude-sonnet-4-6")
 
     def max_tokens_for(self, role: str) -> int:
-        return self._data["max_tokens"].get(role, 4096)
+        # Resolved dynamically by AgentBase on first API call.
+        # Return a high starting value; send_message will auto-correct.
+        return 128000
 
     def threshold(self, name: str) -> Any:
         return self._data["thresholds"][name]

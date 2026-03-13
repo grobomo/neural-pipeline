@@ -244,28 +244,65 @@ def _exec_edit_file(inp: dict, root: Path) -> str:
     return f"Replaced {replaced} occurrence(s) in {inp['path']}"
 
 
+# Active shell process -- set by _exec_shell, read by kill_active_shell()
+_active_shell_proc: subprocess.Popen | None = None
+
+
+def kill_active_shell() -> bool:
+    """Kill the currently running shell subprocess, if any.
+
+    Returns True if a process was killed, False if nothing was running.
+    Called by TUI's SIGINT handler to interrupt commands without exiting.
+    """
+    global _active_shell_proc
+    proc = _active_shell_proc
+    if proc is None:
+        return False
+    try:
+        proc.kill()
+        return True
+    except Exception:
+        return False
+
+
 def _exec_shell(inp: dict, root: Path) -> str:
+    global _active_shell_proc
     cwd = root
     if "cwd" in inp:
         cwd = _resolve_path(inp["cwd"], root)
     try:
-        result = subprocess.run(
-            inp["command"],
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(cwd),
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-        )
-        output = result.stdout
-        if result.stderr:
-            output += "\n--- stderr ---\n" + result.stderr
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
+        kwargs = {
+            "shell": True,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "cwd": str(cwd),
+            "env": {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen(inp["command"], **kwargs)
+        _active_shell_proc = proc
+        try:
+            stdout, stderr = proc.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return "Command timed out after 120 seconds"
+        finally:
+            _active_shell_proc = None
+
+        output = stdout or ""
+        if stderr:
+            output += "\n--- stderr ---\n" + stderr
+        if proc.returncode != 0:
+            output += f"\n[exit code: {proc.returncode}]"
         return output[:50000]  # cap output size
-    except subprocess.TimeoutExpired:
-        return "Command timed out after 120 seconds"
+    except Exception as e:
+        _active_shell_proc = None
+        if "killed" in str(e).lower() or isinstance(e, OSError):
+            return "[command interrupted]"
+        return f"Shell error: {e}"
 
 
 def _exec_search_files(inp: dict, root: Path) -> str:

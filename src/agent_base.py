@@ -4,6 +4,7 @@ All agents (ego, managers, workers, monitor) inherit from this.
 Provides: SDK client init, JSONL conversation logging, tool execution,
 and a run() method that subclasses override.
 """
+import concurrent.futures
 import json
 import os
 import shutil
@@ -31,7 +32,10 @@ class AgentBase:
         self.role = role
         self.config = config or Config()
         self.model = self.config.model_for(role)
-        self.max_tokens = self.config.max_tokens_for(role)
+        # Use cached resolved value if a previous agent already probed this model
+        self.max_tokens = AgentBase._resolved_max_tokens.get(
+            self.model, self.config.max_tokens_for(role)
+        )
         self.system_prompt = system_prompt
         self.tools = tools or []
 
@@ -48,7 +52,14 @@ class AgentBase:
     @property
     def client(self) -> anthropic.Anthropic:
         if self._client is None:
-            api_key = get_api_key(self.config.credential_key)
+            try:
+                api_key = get_api_key(self.config.credential_key)
+            except Exception as e:
+                self.log("error", {
+                    "phase": "client_init",
+                    "error": f"Failed to get API key: {e}",
+                })
+                raise
 
             # Set env vars required by the proxy
             for k, v in self.config.env_vars.items():
@@ -72,15 +83,20 @@ class AgentBase:
 
     def log(self, entry_type: str, content: Any, **extra):
         """Append one JSONL line to the conversation log."""
-        self._open_log()
-        record = {
-            "type": entry_type,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "content": content,
-        }
-        record.update(extra)
-        self._log_file.write(json.dumps(record, default=str) + "\n")
-        self._log_file.flush()
+        try:
+            self._open_log()
+            record = {
+                "type": entry_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "content": content,
+            }
+            record.update(extra)
+            self._log_file.write(json.dumps(record, default=str) + "\n")
+            self._log_file.flush()
+        except Exception:
+            # Logging should never crash the agent -- degrade gracefully
+            import sys
+            print(f"[log-write-failed] {entry_type}: {extra}", file=sys.stderr)
 
     def close_log(self):
         if self._log_file:
@@ -96,6 +112,39 @@ class AgentBase:
 
     # -- SDK Calls --
 
+    # Class-level cache: model name -> resolved max_tokens
+    _resolved_max_tokens: dict[str, int] = {}
+
+    def _api_call_with_retry(self, kwargs: dict) -> anthropic.types.Message:
+        """Make API call with interruptible threading and max_tokens auto-correction."""
+        import re as _re
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.client.messages.create, **kwargs)
+            try:
+                return future.result()
+            except KeyboardInterrupt:
+                future.cancel()
+                raise
+            except anthropic.BadRequestError as e:
+                # Auto-correct max_tokens if the API tells us the limit
+                err_msg = str(e)
+                m = _re.search(r"max_tokens.*?(\d{4,})", err_msg)
+                if m and "max_tokens" in err_msg:
+                    correct_max = int(m.group(1))
+                    AgentBase._resolved_max_tokens[self.model] = correct_max
+                    self.max_tokens = correct_max
+                    kwargs["max_tokens"] = correct_max
+                    self.log("max_tokens_resolved", {"model": self.model, "max_tokens": correct_max})
+                    # Retry with corrected value
+                    future2 = pool.submit(self.client.messages.create, **kwargs)
+                    try:
+                        return future2.result()
+                    except KeyboardInterrupt:
+                        future2.cancel()
+                        raise
+                raise
+
     def send_message(
         self,
         messages: list[dict],
@@ -106,7 +155,12 @@ class AgentBase:
         sys_prompt = system or self.system_prompt
         use_tools = tools if tools is not None else self.tools
 
-        self.log("user", messages[-1].get("content", ""))
+        # Sanitize before sending -- fix orphaned tool_use/tool_result from
+        # interrupted sessions or corrupted message history
+        messages = sanitize_messages(messages)
+
+        # Log full API message format for session reconstruction
+        self.log("user", messages[-1])
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -118,13 +172,27 @@ class AgentBase:
         if use_tools:
             kwargs["tools"] = use_tools
 
-        response = self.client.messages.create(**kwargs)
+        # Run API call in a thread so Ctrl+C can interrupt on Windows.
+        # Python's SIGINT can't break into blocking C-level socket reads,
+        # but it CAN interrupt a main-thread future.result() wait.
+        response = self._api_call_with_retry(kwargs)
 
-        # Log assistant response
+        # Build assistant message in API format (same as what goes into messages[])
+        assistant_msg = {"role": "assistant", "content": []}
+        for block in response.content:
+            if block.type == "text":
+                assistant_msg["content"].append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                assistant_msg["content"].append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+
         self.log(
             "assistant",
-            _extract_text(response),
-            tool_calls=_extract_tool_calls(response),
+            assistant_msg,
             stop_reason=response.stop_reason,
             usage={
                 "input_tokens": response.usage.input_tokens,
@@ -157,8 +225,16 @@ class AgentBase:
         """
         messages = list(initial_messages)
 
-        for _ in range(max_turns):
-            response = self.send_message(messages)
+        for turn in range(max_turns):
+            try:
+                response = self.send_message(messages)
+            except Exception as e:
+                self.log("error", {
+                    "phase": "agentic_loop",
+                    "turn": turn,
+                    "error": str(e),
+                })
+                break
 
             # Build assistant message from response content blocks
             assistant_content = []
@@ -172,6 +248,16 @@ class AgentBase:
                         "name": block.name,
                         "input": block.input,
                     })
+
+            # max_tokens truncation: tool_use blocks may be incomplete.
+            # Strip them and ask the model to retry with smaller steps.
+            if response.stop_reason == "max_tokens":
+                text_only = [b for b in assistant_content if b.get("type") != "tool_use"]
+                if text_only:
+                    messages.append({"role": "assistant", "content": text_only})
+                self.log("truncated", {"stop_reason": "max_tokens", "turn": turn})
+                messages.append({"role": "user", "content": "Your response was truncated. Continue, but use smaller steps -- one tool call at a time."})
+                continue
 
             messages.append({"role": "assistant", "content": assistant_content})
 
@@ -212,6 +298,101 @@ class AgentBase:
 
     def __exit__(self, *args):
         self.close_log()
+
+
+def sanitize_messages(messages: list[dict]) -> list[dict]:
+    """Fix orphaned tool_use/tool_result blocks that cause API 400 errors.
+
+    The API requires:
+    - Every tool_result references a tool_use_id from the preceding assistant message.
+    - Every assistant tool_use is followed by a user message with matching tool_results.
+
+    Interrupted sessions, log reconstruction, or message accumulation can break
+    these invariants. This function is called before every API call as a safety net.
+    """
+    if not messages:
+        return messages
+
+    # Pass 1: drop orphaned tool_result messages
+    sanitized = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "user" and isinstance(content, list) and content:
+            has_tool_results = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if has_tool_results:
+                if not sanitized:
+                    continue
+
+                prev = sanitized[-1]
+                if prev.get("role") != "assistant":
+                    continue
+
+                prev_content = prev.get("content", [])
+                if not isinstance(prev_content, list):
+                    continue
+
+                tool_use_ids = {
+                    b["id"] for b in prev_content
+                    if isinstance(b, dict) and b.get("type") == "tool_use" and "id" in b
+                }
+
+                if not tool_use_ids:
+                    continue
+
+                valid_results = [
+                    b for b in content
+                    if isinstance(b, dict) and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") in tool_use_ids
+                ]
+
+                if not valid_results:
+                    continue
+
+                non_results = [
+                    b for b in content
+                    if not (isinstance(b, dict) and b.get("type") == "tool_result")
+                ]
+
+                sanitized.append({"role": "user", "content": non_results + valid_results})
+                continue
+
+        sanitized.append(msg)
+
+    # Pass 2: strip orphaned tool_use blocks (no matching tool_results after)
+    cleaned = []
+    for i, msg in enumerate(sanitized):
+        role = msg.get("role")
+        content = msg.get("content", [])
+
+        if role == "assistant" and isinstance(content, list):
+            tool_use_ids = {
+                b["id"] for b in content
+                if isinstance(b, dict) and b.get("type") == "tool_use" and "id" in b
+            }
+            if tool_use_ids:
+                nxt = sanitized[i + 1] if i + 1 < len(sanitized) else None
+                has_results = False
+                if nxt and nxt.get("role") == "user" and isinstance(nxt.get("content"), list):
+                    result_ids = {
+                        b.get("tool_use_id") for b in nxt["content"]
+                        if isinstance(b, dict) and b.get("type") == "tool_result"
+                    }
+                    has_results = bool(tool_use_ids & result_ids)
+
+                if not has_results:
+                    text_only = [b for b in content if isinstance(b, dict) and b.get("type") != "tool_use"]
+                    if text_only:
+                        cleaned.append({"role": "assistant", "content": text_only})
+                    continue
+
+        cleaned.append(msg)
+
+    return cleaned
 
 
 def _extract_text(response: anthropic.types.Message) -> str:

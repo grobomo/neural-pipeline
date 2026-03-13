@@ -5,9 +5,11 @@ write predictions, delegate to workers, review results, score
 prediction errors, and move tasks to the next phase.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -212,13 +214,15 @@ Written: {datetime.now(timezone.utc).isoformat()}
         ]
         self.log("worker_spawned", {"step": step_path.name, "cmd": " ".join(cmd)})
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout per step
-            cwd=str(self.config.root),
-        )
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 300,  # 5 minute timeout per step
+            "cwd": str(self.config.root),
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(cmd, **kwargs)
 
         output = {
             "step": step_path.name,
@@ -425,9 +429,24 @@ Respond in this exact JSON format:
 
         next_dir.mkdir(parents=True, exist_ok=True)
         dest = next_dir / self.task_path.name
-        shutil.move(str(self.task_path), str(dest))
-        self.task_path = dest
-        self.log("task_moved", {"to": str(next_dir), "phase": self.phase})
+        try:
+            if not self.task_path.exists():
+                self.log("error", {
+                    "phase": "move_task",
+                    "error": f"Task file missing: {self.task_path}",
+                })
+                return
+            shutil.move(str(self.task_path), str(dest))
+            self.task_path = dest
+            self.log("task_moved", {"to": str(next_dir), "phase": self.phase})
+        except Exception as e:
+            self.log("error", {
+                "phase": "move_task",
+                "error": str(e),
+                "src": str(self.task_path),
+                "dest": str(dest),
+            })
+            self.flag_pain_signal("task-move-failed", f"Could not move {self.task_path.name}: {e}")
 
     def flag_pain_signal(self, signal_type: str, description: str):
         """Write a pain signal to ego/pain-signals/."""
@@ -453,6 +472,22 @@ Time: {ts}
         and review logic. Default implementation uses LLM to break
         the task into steps, then processes each one.
         """
+        try:
+            return self._run_inner(**kwargs)
+        except Exception as e:
+            self.log("error", {
+                "phase": self.phase,
+                "task_id": self.task_id,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            })
+            self.flag_pain_signal("manager-crashed", f"{self.phase} manager crashed on task {self.task_id}: {e}")
+            return {"error": str(e), "task_id": self.task_id, "phase": self.phase}
+        finally:
+            self.close_log()
+
+    def _run_inner(self, **kwargs) -> dict[str, Any]:
+        """Inner run logic, wrapped by run() for error handling."""
         self.log("system", self.system_prompt)
         self.log("task_start", {"task_id": self.task_id, "phase": self.phase})
 
@@ -501,21 +536,25 @@ Respond in this JSON format:
             step_paths.append(path)
 
             # Write prediction
-            pred_prompt = f"""Based on these instructions and criteria, predict what good output looks like:
+            try:
+                pred_prompt = f"""Based on these instructions and criteria, predict what good output looks like:
 
 Instructions: {step['instructions']}
 Criteria: {', '.join(step['success_criteria'])}
 
 Write a brief prediction (2-3 sentences) of what the worker will produce."""
 
-            pred_msgs = [{"role": "user", "content": pred_prompt}]
-            pred_response = self.send_message(pred_msgs)
-            pred_text = ""
-            for block in pred_response.content:
-                if block.type == "text":
-                    pred_text = block.text
-                    break
-            self.write_prediction(i, pred_text)
+                pred_msgs = [{"role": "user", "content": pred_prompt}]
+                pred_response = self.send_message(pred_msgs)
+                pred_text = ""
+                for block in pred_response.content:
+                    if block.type == "text":
+                        pred_text = block.text
+                        break
+                self.write_prediction(i, pred_text)
+            except Exception as e:
+                self.log("error", {"phase": "prediction", "step": i, "error": str(e)})
+                self.write_prediction(i, f"(prediction failed: {e})")
 
             # Spawn worker
             try:
@@ -529,7 +568,16 @@ Write a brief prediction (2-3 sentences) of what the worker will produce."""
                 self.phase_dir / "workers" / "steps" / "completed" / path.name
             )
             if completed_path.exists():
-                review = self.review_step(completed_path, i)
+                try:
+                    review = self.review_step(completed_path, i)
+                except Exception as e:
+                    self.log("error", {"phase": "review_step", "step": i, "error": str(e)})
+                    review = {
+                        "met_criteria": "no",
+                        "prediction_match": "fell-short",
+                        "diagnosis": "na",
+                        "notes": f"Review failed: {e}",
+                    }
                 score = self.score_prediction(review)
                 review["step"] = i
                 review["description"] = step["description"]
@@ -562,8 +610,6 @@ Write a brief prediction (2-3 sentences) of what the worker will produce."""
 
         # Move task to next phase
         self.move_task_to_next_phase()
-
-        self.close_log()
 
         return {
             "task_id": self.task_id,

@@ -8,6 +8,7 @@ Usage:
   python -m src.monitor /path/to/project/root
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -64,28 +65,39 @@ class Monitor(AgentBase):
 
     def on_task_arrived(self, task_path: Path):
         """Called when a task file appears in a phase folder."""
-        # Determine which phase this is
-        phase = task_path.parent.name
-        pipeline_phases = self.config.pipeline_phases
+        try:
+            # Determine which phase this is
+            phase = task_path.parent.name
+            pipeline_phases = self.config.pipeline_phases
 
-        # Input phase: move task to first processing phase (why)
-        if phase == "input":
-            self.log("task_detected", {"phase": "input", "task": task_path.name})
-            why_dir = self.config.phase_dir("why")
-            why_dir.mkdir(parents=True, exist_ok=True)
-            import shutil
-            dest = why_dir / task_path.name
-            shutil.move(str(task_path), str(dest))
-            self.log("task_routed", {"from": "input", "to": "why", "task": task_path.name})
-            self.spawn_manager("why", dest)
-            return
+            # Input phase: move task to first processing phase (why)
+            if phase == "input":
+                self.log("task_detected", {"phase": "input", "task": task_path.name})
+                why_dir = self.config.phase_dir("why")
+                why_dir.mkdir(parents=True, exist_ok=True)
+                import shutil
+                dest = why_dir / task_path.name
+                if not task_path.exists():
+                    self.log("task_already_moved", {"task": task_path.name})
+                    return
+                shutil.move(str(task_path), str(dest))
+                self.log("task_routed", {"from": "input", "to": "why", "task": task_path.name})
+                self.spawn_manager("why", dest)
+                return
 
-        if phase not in pipeline_phases:
-            self.log("event_ignored", {"path": str(task_path), "reason": f"not a processing phase: {phase}"})
-            return
+            if phase not in pipeline_phases:
+                self.log("event_ignored", {"path": str(task_path), "reason": f"not a processing phase: {phase}"})
+                return
 
-        self.log("task_detected", {"phase": phase, "task": task_path.name})
-        self.spawn_manager(phase, task_path)
+            self.log("task_detected", {"phase": phase, "task": task_path.name})
+            self.spawn_manager(phase, task_path)
+        except Exception as e:
+            self.log("error", {
+                "phase": "on_task_arrived",
+                "task": str(task_path),
+                "error": str(e),
+            })
+            self.flag_pain_signal("task-routing-failed", f"Failed to route {task_path.name}: {e}")
 
     def spawn_manager(self, phase: str, task_path: Path):
         """Spawn a manager subprocess for a phase."""
@@ -98,12 +110,14 @@ class Monitor(AgentBase):
         self.log("manager_spawned", {"phase": phase, "task": task_path.name, "cmd": " ".join(cmd)})
 
         try:
-            result = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(self.config.root),
-            )
+            kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "cwd": str(self.config.root),
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.Popen(cmd, **kwargs)
             self.log("manager_started", {"phase": phase, "pid": result.pid})
         except Exception as e:
             self.log("manager_spawn_error", {"phase": phase, "error": str(e)})
@@ -127,8 +141,11 @@ Time: {ts}
 
     def write_heartbeat(self):
         """Update the heartbeat file."""
-        heartbeat = self.health_dir / "heartbeat"
-        heartbeat.write_text(datetime.now(timezone.utc).isoformat())
+        try:
+            heartbeat = self.health_dir / "heartbeat"
+            heartbeat.write_text(datetime.now(timezone.utc).isoformat())
+        except Exception as e:
+            self.log("error", {"phase": "heartbeat", "error": str(e)})
 
     def check_stuck_tasks(self):
         """Check for tasks stuck too long in a phase."""
@@ -196,6 +213,11 @@ Time: {ts}
         """Start the monitor daemon."""
         self.log("monitor_start", {"root": str(self.config.root)})
         self._running = True
+        
+        # Write PID file
+        pid_file = Path(".tmp") / "monitor.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()))
 
         # Set up watchdog observers for each phase folder
         handler = PipelineEventHandler(self)
@@ -226,18 +248,23 @@ Time: {ts}
 
                 # Health check every 10 heartbeats
                 if health_check_counter >= 10:
-                    self.check_health()
-                    self.check_stuck_tasks()
+                    try:
+                        self.check_health()
+                        self.check_stuck_tasks()
+                    except Exception as e:
+                        self.log("error", {"phase": "health_check", "error": str(e)})
                     health_check_counter = 0
 
                 time.sleep(heartbeat_interval)
         except KeyboardInterrupt:
             self.log("monitor_stopping", {"reason": "keyboard_interrupt"})
+        except Exception as e:
+            self.log("error", {"phase": "monitor_loop", "error": str(e)})
         finally:
             self.observer.stop()
             self.observer.join()
-            self.close_log()
             self.log("monitor_stopped", {})
+            self.close_log()
 
     def stop(self):
         """Gracefully stop the monitor."""
@@ -256,7 +283,12 @@ def main():
         os.chdir(str(root))
 
     monitor = Monitor()
-    monitor.run()
+    try:
+        monitor.run()
+    except Exception as e:
+        monitor.log("error", {"phase": "monitor_main", "error": str(e)})
+        monitor.close_log()
+        raise
 
 
 if __name__ == "__main__":
